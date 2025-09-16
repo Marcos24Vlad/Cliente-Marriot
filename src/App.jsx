@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Upload, PlayCircle, Download, Clock, CheckCircle, XCircle, FileText, User, Settings } from 'lucide-react';
+import { Upload, PlayCircle, Download, Clock, CheckCircle, XCircle, FileText, User, Settings, AlertCircle } from 'lucide-react';
 
 const API_BASE_URL = 'https://server-marriott.onrender.com';
 
@@ -13,9 +13,11 @@ function App() {
   const [procesando, setProcesando] = useState(false);
   const [error, setError] = useState(null);
   const [downloadUrl, setDownloadUrl] = useState(null);
+  const [connectionStatus, setConnectionStatus] = useState('checking'); // nuevo
   
   const logsEndRef = useRef(null);
   const intervalRef = useRef(null);
+  const logCountRef = useRef(0); // Para evitar duplicados
 
   // Auto-scroll logs al final
   const scrollToBottom = () => {
@@ -23,6 +25,35 @@ function App() {
   };
 
   useEffect(scrollToBottom, [logs]);
+
+  // Verificar conexión al backend al cargar
+  useEffect(() => {
+    const checkConnection = async () => {
+      try {
+        console.log('🔄 Verificando conexión al backend...');
+        const response = await fetch(`${API_BASE_URL}/health`, {
+          method: 'GET',
+          headers: {
+            'Accept': 'application/json',
+            'Content-Type': 'application/json'
+          }
+        });
+        
+        if (response.ok) {
+          console.log('✅ Backend conectado exitosamente');
+          setConnectionStatus('connected');
+        } else {
+          throw new Error(`HTTP ${response.status}`);
+        }
+      } catch (error) {
+        console.error('❌ Error conectando al backend:', error);
+        setConnectionStatus('error');
+        setError(`No se puede conectar al servidor: ${error.message}`);
+      }
+    };
+
+    checkConnection();
+  }, []);
 
   // Cleanup interval cuando el componente se desmonta
   useEffect(() => {
@@ -34,73 +65,102 @@ function App() {
   }, []);
 
   const handleFileChange = (e) => {
-    const file = e.target.files[0];
-    if (file) {
+    try {
+      const file = e.target.files[0];
+      if (!file) {
+        setArchivo(null);
+        return;
+      }
+      
+      console.log('📁 Archivo seleccionado:', file.name, file.type, file.size);
+      
+      // Validar tamaño (máximo 10MB)
+      if (file.size > 10 * 1024 * 1024) {
+        setError('El archivo es demasiado grande. Máximo 10MB.');
+        return;
+      }
+      
       // Validar tipo de archivo
       const validTypes = [
         'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         'application/vnd.ms-excel'
       ];
       
-      if (!validTypes.includes(file.type) && !file.name.match(/\.(xlsx|xls)$/i)) {
+      const isValidType = validTypes.includes(file.type) || file.name.match(/\.(xlsx|xls)$/i);
+      
+      if (!isValidType) {
         setError('Por favor selecciona un archivo Excel válido (.xlsx o .xls)');
         return;
       }
       
       setArchivo(file);
       setError(null);
+      console.log('✅ Archivo válido aceptado');
+    } catch (error) {
+      console.error('❌ Error manejando archivo:', error);
+      setError('Error procesando el archivo');
     }
   };
 
   const agregarLog = (mensaje, tipo = 'info') => {
     const timestamp = new Date().toLocaleTimeString();
     const logEntry = {
+      id: logCountRef.current++,
       timestamp,
       mensaje,
       tipo
     };
+    
+    console.log(`${getLogIcon(tipo)} ${mensaje}`);
     setLogs(prev => [...prev, logEntry]);
   };
 
   const consultarEstado = async (taskId) => {
     try {
-      const response = await fetch(`${API_BASE_URL}/status/${taskId}`);
+      console.log(`🔍 Consultando estado para task: ${taskId}`);
+      
+      const response = await fetch(`${API_BASE_URL}/status/${taskId}`, {
+        method: 'GET',
+        headers: {
+          'Accept': 'application/json',
+          'Content-Type': 'application/json'
+        }
+      });
       
       if (!response.ok) {
-        throw new Error('Error consultando estado');
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
       
       const status = await response.json();
+      console.log('📊 Estado recibido:', status);
+      
       setTaskStatus(status);
 
-      // Agregar logs nuevos
+      // Agregar logs nuevos (mejorado para evitar duplicados)
       if (status.logs && Array.isArray(status.logs)) {
-        status.logs.forEach(log => {
-          // Evitar duplicados comparando timestamp + contenido
-          const logExists = logs.some(existingLog => 
-            existingLog.mensaje === log || existingLog.mensaje.includes(log.split('] ')[1] || log)
-          );
+        const currentLogCount = logs.length;
+        const newLogs = status.logs.slice(currentLogCount);
+        
+        newLogs.forEach(log => {
+          const cleanLog = log.replace(/^\[\d{2}:\d{2}:\d{2}\]\s*/, '');
+          let tipoLog = 'info';
           
-          if (!logExists) {
-            const cleanLog = log.replace(/^\[\d{2}:\d{2}:\d{2}\]\s*/, '');
-            let tipoLog = 'info';
-            
-            if (cleanLog.includes('✅') || cleanLog.includes('ÉXITO')) tipoLog = 'success';
-            else if (cleanLog.includes('❌') || cleanLog.includes('ERROR')) tipoLog = 'error';
-            else if (cleanLog.includes('⚠️') || cleanLog.includes('WARNING')) tipoLog = 'warning';
-            
-            agregarLog(cleanLog, tipoLog);
-          }
+          if (cleanLog.includes('✅') || cleanLog.includes('ÉXITO')) tipoLog = 'success';
+          else if (cleanLog.includes('❌') || cleanLog.includes('ERROR')) tipoLog = 'error';
+          else if (cleanLog.includes('⚠️') || cleanLog.includes('WARNING')) tipoLog = 'warning';
+          
+          agregarLog(cleanLog, tipoLog);
         });
       }
 
       // Si el proceso terminó
       if (status.status === 'completed') {
-        agregarLog(`🎉 Proceso completado! ${status.successful_records} exitosos, ${status.error_records} errores`, 'success');
+        agregarLog(`🎉 Proceso completado! ${status.successful_records || 0} exitosos, ${status.error_records || 0} errores`, 'success');
         
         if (status.result_file_url) {
           const filename = status.result_file_url.split('/').pop();
           setDownloadUrl(`${API_BASE_URL}/download/${filename}`);
+          agregarLog('📥 Archivo de resultados listo para descarga', 'success');
         }
         
         // Detener polling
@@ -111,7 +171,8 @@ function App() {
         
         setProcesando(false);
       } else if (status.status === 'error') {
-        agregarLog(`🚨 Error en el proceso: ${status.message}`, 'error');
+        const errorMsg = status.message || 'Error desconocido en el proceso';
+        agregarLog(`🚨 Error en el proceso: ${errorMsg}`, 'error');
         
         if (intervalRef.current) {
           clearInterval(intervalRef.current);
@@ -119,16 +180,32 @@ function App() {
         }
         
         setProcesando(false);
-        setError(status.message);
+        setError(errorMsg);
       }
 
     } catch (error) {
-      console.error('Error consultando estado:', error);
+      console.error('❌ Error consultando estado:', error);
       agregarLog(`Error consultando estado: ${error.message}`, 'error');
+      
+      // Si hay muchos errores consecutivos, detener el polling
+      const recentErrors = logs.filter(log => 
+        log.tipo === 'error' && 
+        log.mensaje.includes('Error consultando estado')
+      ).length;
+      
+      if (recentErrors > 3) {
+        if (intervalRef.current) {
+          clearInterval(intervalRef.current);
+          intervalRef.current = null;
+        }
+        setProcesando(false);
+        setError('Demasiados errores de conexión. Proceso detenido.');
+      }
     }
   };
 
   const procesarExcel = async () => {
+    // Validaciones
     if (!archivo) {
       setError('Debes seleccionar un archivo Excel');
       return;
@@ -139,17 +216,29 @@ function App() {
       return;
     }
 
+    if (connectionStatus !== 'connected') {
+      setError('No hay conexión con el servidor. Verifica tu conexión a internet.');
+      return;
+    }
+
     // Reset estado
     setError(null);
     setLogs([]);
     setTaskStatus(null);
     setDownloadUrl(null);
     setProcesando(true);
+    logCountRef.current = 0;
 
     const formData = new FormData();
     formData.append('archivo_excel', archivo);
     formData.append('tipo_afiliacion', tipo);
     formData.append('nombre_afiliador', afiliador.trim());
+
+    console.log('📤 Enviando datos:', {
+      archivo: archivo.name,
+      tipo,
+      afiliador: afiliador.trim()
+    });
 
     try {
       agregarLog('📤 Subiendo archivo y iniciando proceso...', 'info');
@@ -157,37 +246,54 @@ function App() {
       const response = await fetch(`${API_BASE_URL}/procesar`, {
         method: 'POST',
         body: formData,
+        // No agregar Content-Type header para FormData
       });
 
+      console.log('📡 Respuesta del servidor:', response.status, response.statusText);
+
       if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.detail || 'Error al procesar archivo');
+        let errorMessage = 'Error al procesar archivo';
+        try {
+          const errorData = await response.json();
+          errorMessage = errorData.detail || errorData.message || errorMessage;
+        } catch {
+          errorMessage = `Error HTTP ${response.status}: ${response.statusText}`;
+        }
+        throw new Error(errorMessage);
       }
 
       const data = await response.json();
+      console.log('✅ Datos recibidos:', data);
       
       if (!data.task_id) {
-        throw new Error('No se recibió ID de tarea');
+        throw new Error('No se recibió ID de tarea del servidor');
       }
 
       setTaskId(data.task_id);
       agregarLog(`✅ Proceso iniciado! Task ID: ${data.task_id}`, 'success');
-      agregarLog(`📊 Total de registros: ${data.total_records}`, 'info');
-      agregarLog(`⏱️ Tiempo estimado: ${Math.ceil(data.estimated_time_minutes)} minutos`, 'info');
+      
+      if (data.total_records) {
+        agregarLog(`📊 Total de registros: ${data.total_records}`, 'info');
+      }
+      
+      if (data.estimated_time_minutes) {
+        agregarLog(`⏱️ Tiempo estimado: ${Math.ceil(data.estimated_time_minutes)} minutos`, 'info');
+      }
 
-      // Iniciar polling cada 3 segundos
+      // Iniciar polling cada 5 segundos (aumentado para evitar sobrecarga)
       intervalRef.current = setInterval(() => {
         consultarEstado(data.task_id);
-      }, 3000);
+      }, 5000);
 
-      // Primera consulta inmediata
-      setTimeout(() => consultarEstado(data.task_id), 1000);
+      // Primera consulta después de 3 segundos
+      setTimeout(() => consultarEstado(data.task_id), 3000);
 
     } catch (error) {
-      console.error('Error:', error);
-      setError(`Error al iniciar proceso: ${error.message}`);
+      console.error('🚨 Error en procesarExcel:', error);
+      const errorMsg = `Error al iniciar proceso: ${error.message}`;
+      setError(errorMsg);
       setProcesando(false);
-      agregarLog(`🚨 Error: ${error.message}`, 'error');
+      agregarLog(`🚨 ${errorMsg}`, 'error');
     }
   };
 
@@ -198,6 +304,12 @@ function App() {
     }
     setProcesando(false);
     agregarLog('🛑 Monitoreo detenido manualmente', 'warning');
+  };
+
+  const limpiarLogs = () => {
+    setLogs([]);
+    logCountRef.current = 0;
+    agregarLog('🧹 Logs limpiados', 'info');
   };
 
   const getLogIcon = (tipo) => {
@@ -218,6 +330,34 @@ function App() {
     }
   };
 
+  const getConnectionStatusColor = () => {
+    switch(connectionStatus) {
+      case 'connected': return 'text-green-400';
+      case 'error': return 'text-red-400';
+      default: return 'text-yellow-400';
+    }
+  };
+
+  const getConnectionStatusText = () => {
+    switch(connectionStatus) {
+      case 'connected': return '🟢 Conectado';
+      case 'error': return '🔴 Desconectado';
+      default: return '🟡 Verificando...';
+    }
+  };
+
+  // Loading spinner si está verificando conexión
+  if (connectionStatus === 'checking') {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-blue-900 via-blue-800 to-indigo-900 flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-white mx-auto mb-4"></div>
+          <p className="text-white">Conectando con el servidor...</p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-900 via-blue-800 to-indigo-900">
       <div className="container mx-auto px-4 py-8">
@@ -226,9 +366,12 @@ function App() {
           <h1 className="text-4xl font-bold text-white mb-2">
             Automatización Marriott Bonvoy
           </h1>
-          <p className="text-blue-200">
+          <p className="text-blue-200 mb-2">
             Procesa afiliaciones automáticamente desde archivos Excel
           </p>
+          <div className={`text-sm ${getConnectionStatusColor()}`}>
+            {getConnectionStatusText()}
+          </div>
         </div>
 
         <div className="max-w-6xl mx-auto grid grid-cols-1 lg:grid-cols-2 gap-8">
@@ -246,7 +389,7 @@ function App() {
                   Tipo de Afiliación
                 </label>
                 <select
-                  className="w-full bg-white/10 border border-white/30 rounded-lg p-3 text-white placeholder-white/60 focus:ring-2 focus:ring-blue-400 focus:border-transparent"
+                  className="w-full bg-white/10 border border-white/30 rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-400 focus:border-transparent"
                   value={tipo}
                   onChange={(e) => setTipo(e.target.value)}
                   disabled={procesando}
@@ -289,7 +432,9 @@ function App() {
                   />
                   <label
                     htmlFor="file-upload"
-                    className="flex items-center justify-center w-full p-4 border-2 border-dashed border-white/30 rounded-lg cursor-pointer hover:border-white/50 transition-colors"
+                    className={`flex items-center justify-center w-full p-4 border-2 border-dashed rounded-lg transition-colors cursor-pointer ${
+                      procesando ? 'border-white/20 cursor-not-allowed' : 'border-white/30 hover:border-white/50'
+                    }`}
                   >
                     <Upload className="w-5 h-5 text-white mr-2" />
                     <span className="text-white">
@@ -303,7 +448,7 @@ function App() {
               {error && (
                 <div className="bg-red-500/20 border border-red-500/50 rounded-lg p-3">
                   <div className="flex items-center">
-                    <XCircle className="w-5 h-5 text-red-400 mr-2" />
+                    <AlertCircle className="w-5 h-5 text-red-400 mr-2 flex-shrink-0" />
                     <span className="text-red-200 text-sm">{error}</span>
                   </div>
                 </div>
@@ -313,7 +458,7 @@ function App() {
               <div className="flex space-x-3">
                 <button
                   onClick={procesarExcel}
-                  disabled={procesando || !archivo || !afiliador.trim()}
+                  disabled={procesando || !archivo || !afiliador.trim() || connectionStatus !== 'connected'}
                   className="flex-1 bg-gradient-to-r from-blue-500 to-indigo-600 text-white py-3 px-6 rounded-lg font-medium hover:from-blue-600 hover:to-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all flex items-center justify-center"
                 >
                   {procesando ? (
@@ -355,22 +500,26 @@ function App() {
                   </div>
                   
                   {/* Barra de Progreso */}
-                  <div className="w-full bg-white/20 rounded-full h-2">
-                    <div
-                      className="bg-gradient-to-r from-blue-500 to-indigo-500 h-2 rounded-full transition-all duration-300"
-                      style={{ width: `${taskStatus.progress}%` }}
-                    ></div>
-                  </div>
+                  {taskStatus.progress !== undefined && (
+                    <div className="w-full bg-white/20 rounded-full h-2">
+                      <div
+                        className="bg-gradient-to-r from-blue-500 to-indigo-500 h-2 rounded-full transition-all duration-300"
+                        style={{ width: `${Math.max(0, Math.min(100, taskStatus.progress))}%` }}
+                      ></div>
+                    </div>
+                  )}
                   
                   {/* Estadísticas */}
                   <div className="grid grid-cols-2 gap-4 text-sm">
                     <div className="text-center">
                       <div className="text-white/60">Procesados</div>
-                      <div className="text-white font-medium">{taskStatus.processed_records}/{taskStatus.total_records}</div>
+                      <div className="text-white font-medium">
+                        {taskStatus.processed_records || 0}/{taskStatus.total_records || 0}
+                      </div>
                     </div>
                     <div className="text-center">
                       <div className="text-white/60">Exitosos</div>
-                      <div className="text-green-400 font-medium">{taskStatus.successful_records}</div>
+                      <div className="text-green-400 font-medium">{taskStatus.successful_records || 0}</div>
                     </div>
                   </div>
                   
@@ -404,9 +553,18 @@ function App() {
               <FileText className="w-6 h-6 text-green-400 mr-2" />
               <h2 className="text-xl font-semibold text-white">Logs en Tiempo Real</h2>
               {logs.length > 0 && (
-                <span className="ml-auto bg-white/20 text-white text-xs px-2 py-1 rounded-full">
-                  {logs.length}
-                </span>
+                <>
+                  <span className="ml-auto bg-white/20 text-white text-xs px-2 py-1 rounded-full mr-2">
+                    {logs.length}
+                  </span>
+                  <button
+                    onClick={limpiarLogs}
+                    className="text-white/60 hover:text-white text-xs"
+                    disabled={procesando}
+                  >
+                    Limpiar
+                  </button>
+                </>
               )}
             </div>
 
@@ -416,8 +574,8 @@ function App() {
                   Los logs aparecerán aquí durante el procesamiento...
                 </div>
               ) : (
-                logs.map((log, i) => (
-                  <div key={i} className="mb-1 flex items-start space-x-2">
+                logs.map((log) => (
+                  <div key={log.id} className="mb-1 flex items-start space-x-2">
                     <span className="text-gray-500 text-xs mt-1 flex-shrink-0">
                       {log.timestamp}
                     </span>
